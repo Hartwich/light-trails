@@ -7,10 +7,14 @@ import {
   drawLightTrailsTrailSegmentsToTexture,
   resolveLightTrailsRenderMeta
 } from "./LightTrailsRenderer.js";
+import { renderRoundScreens } from "./roundScreens.js";
+import { bindPlatformTheme, tokens } from "./platformTheme.js";
 
 const hostTheme = {
   bodyFont: '"Nunito Sans", sans-serif',
-  muted: "#94a3b8"
+  get muted() {
+    return tokens().color.muted;
+  }
 };
 
 interface HostClientLike {
@@ -45,9 +49,10 @@ export class LightTrailsHostScene extends Phaser.Scene {
   }
 
   create(): void {
+    bindPlatformTheme(this.registry);
     const client = this.registry.get("hostClient") as HostClientLike;
 
-    this.cameras.main.setBackgroundColor("#020617");
+    this.cameras.main.setBackgroundColor(tokens().color.background);
     this.arenaGraphics = this.add.graphics();
     this.trailTexture = this.add.renderTexture(0, 0, this.scale.width, this.scale.height).setOrigin(0, 0);
     this.trailBrush = this.make.graphics({}, false);
@@ -60,6 +65,11 @@ export class LightTrailsHostScene extends Phaser.Scene {
     this.detailsText.setOrigin(0, 1);
 
     this.unsubscribe = client.subscribe((state) => {
+      // Intro and result screens belong to this game, not the platform.
+      if (renderRoundScreens(this, state)) {
+        return;
+      }
+
       const gameState = (state.game?.state ?? null) as LightTrailsState | null;
       const en = state.room?.language === "en";
 
