@@ -20,7 +20,7 @@ export const lightTrailsManifest = {
   },
 
   ownsScreens: ["round_intro", "result"],
-  visual: { accent: "#7a7cad", eyebrow: "Arcade" },
+  visual: { accent: "#7a7cad", icon: "bolt", eyebrow: "Arcade" },
   audio: { track: { profile: "chase", bpm: 144, rootMidi: 57, masterGain: 0.16 } },
   broadcast: { supportsHostPatches: true },
 } as const satisfies GameManifest;
