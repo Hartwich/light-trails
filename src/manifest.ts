@@ -1,7 +1,9 @@
+import { lightTrailsText } from "./catalogText.js";
 import type { GameManifest } from "@open-party-lab/game-core";
 
 export const lightTrailsManifest = {
   id: "light-trails",
+  translations: lightTrailsText,
   displayName: "Light Trails",
   description: "Lenke deine Spur durch die Arena und ueberlebe am laengsten.",
   minPlayers: 1,
