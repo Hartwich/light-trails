@@ -476,6 +476,10 @@ export const serverGame: ServerGame<
       }
     );
   },
+  onPause(state) {
+    return { ...state, players: Object.fromEntries(Object.entries(state.players).map(([id, player]) =>
+      [id, { ...player, leftPressed: false, rightPressed: false, turnInput: 0 as const }])) };
+  },
   handleInput(state, input) {
     if (input.type !== "turn" || (state.phase !== "countdown" && state.phase !== "playing")) {
       return state;
