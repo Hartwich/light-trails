@@ -402,20 +402,26 @@ function simulateTick(
     totalPlayers > 1
       ? alivePlayerIds.length === 0 || (timedOut && alivePlayerIds.length > 1)
       : alivePlayerIds.length === 0;
-  const en = context.language === "en";
+  const text = {
+    de: { winner: "ueberlebt als Letzter.", solo: "haelt bis zum Zeitlimit durch.", draw: "Diese Runde endet unentschieden.", time: "Zeit abgelaufen.", crash: "Alle sind kollidiert. Unentschieden.", drivers: "Fahrer sind noch im Rennen." },
+    en: { winner: "is the last one standing.", solo: "survived until the time limit.", draw: "This round ends in a draw.", time: "Time is up.", crash: "Everyone crashed. Draw.", drivers: "drivers are still racing." },
+    es: { winner: "es el último en pie.", solo: "sobrevivió hasta que se acabó el tiempo.", draw: "La ronda termina en empate.", time: "Se acabó el tiempo.", crash: "Todos chocaron. Empate.", drivers: "pilotos siguen en carrera." },
+    fr: { winner: "est le dernier en lice.", solo: "a survécu jusqu’à la fin du temps imparti.", draw: "La manche se termine par une égalité.", time: "Le temps est écoulé.", crash: "Tout le monde a percuté une traînée. Égalité.", drivers: "pilotes sont encore en course." },
+    "pt-BR": { winner: "é o último sobrevivente.", solo: "sobreviveu até o tempo acabar.", draw: "A rodada termina empatada.", time: "O tempo acabou.", crash: "Todos bateram. Empate.", drivers: "pilotos continuam na corrida." }
+  }[context.language];
   const message = resolvedWinnerPlayerId
     ? totalPlayers === 1
-      ? en ? `${resolvedWinnerName ?? "You"} survived until the time limit.` : `${resolvedWinnerName ?? "Du"} haelt bis zum Zeitlimit durch.`
-      : en ? `${resolvedWinnerName ?? "A player"} is the last one standing.` : `${resolvedWinnerName ?? "Ein Spieler"} ueberlebt als Letzter.`
+      ? `${resolvedWinnerName ?? (context.language === "de" ? "Du" : context.language === "en" ? "You" : context.language === "es" ? "Tú" : context.language === "fr" ? "Toi" : "Você")} ${text.solo}`
+      : `${resolvedWinnerName ?? (context.language === "de" ? "Ein Spieler" : context.language === "en" ? "A player" : context.language === "es" ? "Un jugador" : context.language === "fr" ? "Un joueur" : "Um jogador")} ${text.winner}`
     : timedOut
       ? totalPlayers === 1
-        ? en ? "Time is up." : "Zeit abgelaufen."
-        : en ? "Time is up. This round ends in a draw." : "Zeit abgelaufen. Diese Runde endet unentschieden."
+        ? text.time
+        : `${text.time} ${text.draw}`
       : alivePlayerIds.length === 0
         ? totalPlayers === 1
-          ? en ? "Collision. Solo test ended." : "Kollision. Solo-Test beendet."
-          : en ? "Everyone crashed. Draw." : "Alle sind kollidiert. Unentschieden."
-        : en ? `${alivePlayerIds.length} drivers are still racing.` : `${alivePlayerIds.length} Fahrer sind noch im Rennen.`;
+          ? text.crash
+          : text.crash
+        : `${alivePlayerIds.length} ${text.drivers}`;
 
   return {
     ...nextState,
@@ -443,9 +449,7 @@ export const serverGame: ServerGame<
     return {
       ...createBaseRoundState("round_intro", context.now, {
         durationMs: phaseTimings.roundIntroMs,
-        message: context.language === "en"
-          ? "Hold left or right. Do not touch the trail."
-          : "Links oder rechts gedrueckt halten. Nicht die Spur beruehren."
+        message: ({ de: "Links oder rechts gedrückt halten. Nicht die Spur berühren.", en: "Hold left or right. Do not touch the trail.", es: "Mantén izquierda o derecha. No toques la estela.", fr: "Maintiens gauche ou droite. Ne touche pas la traînée.", "pt-BR": "Segure para a esquerda ou direita. Não toque no rastro." })[context.language]
       }),
       arenaWidth: lightTrailsConfig.arenaWidth,
       arenaHeight: lightTrailsConfig.arenaHeight,
@@ -466,13 +470,13 @@ export const serverGame: ServerGame<
       {
         ...state,
         finishAt: context.now + lightTrailsConfig.maxPlayingMs,
-        message: context.language === "en" ? "Steer, survive, win." : "Lenken, ueberleben, gewinnen."
+        message: ({ de: "Lenken, überleben, gewinnen.", en: "Steer, survive, win.", es: "Conduce, sobrevive y gana.", fr: "Pilote, survis, gagne.", "pt-BR": "Dirija, sobreviva e vença." })[context.language]
       },
       "playing",
       context.now,
       {
         startedAt: context.now,
-        message: context.language === "en" ? "Steer, survive, win." : "Lenken, ueberleben, gewinnen."
+        message: ({ de: "Lenken, überleben, gewinnen.", en: "Steer, survive, win.", es: "Conduce, sobrevive y gana.", fr: "Pilote, survis, gagne.", "pt-BR": "Dirija, sobreviva e vença." })[context.language]
       }
     );
   },

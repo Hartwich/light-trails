@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import type { SupportedLanguage } from "@open-party-lab/game-core";
 import type { LightTrailsState } from "../protocol.js";
 import { lightTrailsManifest } from "../manifest.js";
 import {
@@ -28,7 +29,7 @@ interface HostAppStateLike {
     message?: string;
   } | null;
   room?: {
-    language?: "de" | "en";
+    language?: SupportedLanguage;
   } | null;
 }
 
@@ -71,7 +72,8 @@ export class LightTrailsHostScene extends Phaser.Scene {
       }
 
       const gameState = (state.game?.state ?? null) as LightTrailsState | null;
-      const en = state.room?.language === "en";
+      const language = state.room?.language ?? "de";
+      const playersLabel = ({ de: "Spieler", en: "players", es: "jugadores", fr: "joueurs", "pt-BR": "jogadores" })[language];
 
       if (
         !this.arenaGraphics ||
@@ -119,7 +121,7 @@ export class LightTrailsHostScene extends Phaser.Scene {
       const alivePlayers = gameState.alivePlayerIds.length;
 
       this.detailsText.setPosition(24, this.scale.height - 22);
-      this.detailsText.setText(`${alivePlayers}/${totalPlayers} ${en ? "players" : "Spieler"}`);
+      this.detailsText.setText(`${alivePlayers}/${totalPlayers} ${playersLabel}`);
     });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
