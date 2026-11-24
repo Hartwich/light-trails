@@ -2,10 +2,26 @@ import type { PlayerInput } from "@open-party-lab/game-core";
 
 export type LightTrailsTurnDirection = "left" | "right";
 export type LightTrailsTurnInput = -1 | 0 | 1;
-export type LightTrailsCollisionReason = "wall" | "trail" | "head_clash" | "timeout";
+export type LightTrailsCollisionReason = "wall" | "trail" | "head_clash" | "timeout" | "reactor" | "collapse";
+export type LightTrailsArena = "classic" | "reactor" | "collapse";
+export type LightTrailsPower = "phase" | "boost";
+
+export interface LightTrailsRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface LightTrailsPickup {
+  id: number;
+  kind: LightTrailsPower;
+  x: number;
+  y: number;
+}
 
 export interface LightTrailsInput extends PlayerInput {
-  type: "turn";
+  type: "light-trails:turn" | "turn";
   direction: LightTrailsTurnDirection;
   active: boolean;
 }
@@ -17,7 +33,7 @@ export interface LightTrailsTrailSegment {
   y2: number;
 }
 
-export interface LightTrailsHostPatchPlayer {
+interface LightTrailsDriver {
   playerId: string;
   name: string;
   color: string;
@@ -26,27 +42,27 @@ export interface LightTrailsHostPatchPlayer {
   angleRad: number;
   alive: boolean;
   turnInput: LightTrailsTurnInput;
-  trailSegments: LightTrailsTrailSegment[];
+  gap?: "warning" | "open";
+  power?: LightTrailsPower;
   eliminatedAt?: number;
   collisionReason?: LightTrailsCollisionReason;
 }
 
-export interface LightTrailsPlayerState {
-  playerId: string;
-  name: string;
-  color: string;
-  x: number;
-  y: number;
-  angleRad: number;
-  alive: boolean;
-  turnInput: LightTrailsTurnInput;
+export interface LightTrailsPlayerState extends LightTrailsDriver {
   trailCellIds: number[];
+  trailLength: number;
   trailSegments: LightTrailsTrailSegment[];
-  eliminatedAt?: number;
-  collisionReason?: LightTrailsCollisionReason;
 }
 
 export interface LightTrailsState {
+  arena: LightTrailsArena;
+  obstacles: readonly LightTrailsRect[];
+  inset: number;
+  nextInset?: number;
+  pickups: readonly LightTrailsPickup[];
+  playerCount: number;
+  remainingMs: number;
+  countdownMs?: number;
   arenaWidth: number;
   arenaHeight: number;
   cellSize: number;
@@ -60,16 +76,15 @@ export interface LightTrailsState {
   players: Record<string, LightTrailsPlayerState>;
 }
 
-export interface LightTrailsHostPatch {
-  arenaWidth: number;
-  arenaHeight: number;
-  cellSize: number;
-  trailThickness: number;
-  tick: number;
-  alivePlayerIds: string[];
-  winnerPlayerId?: string;
-  winnerName?: string;
-  isDraw: boolean;
-  finishAt: number | null;
+export interface LightTrailsHostPatchPlayer extends LightTrailsDriver {
+  trailStart: number;
+  trailSegments: LightTrailsTrailSegment[];
+}
+
+export interface LightTrailsHostPatch extends Pick<
+  LightTrailsState, "tick" | "pickups" | "inset" | "nextInset" | "remainingMs" |
+  "alivePlayerIds" | "winnerPlayerId" | "winnerName" | "isDraw"
+> {
+  fromTick: number;
   players: Record<string, LightTrailsHostPatchPlayer>;
 }

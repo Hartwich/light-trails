@@ -2,11 +2,27 @@
 
 Realtime trail-survival arena game for Open Party Lab with compact phone steering.
 
-![In-game screenshot](docs/screenshots/host.png)
-
 ## Status
 
-Alpha. The realtime survival loop is playable and uses patch streaming. Needs more performance checks, arena tuning, and input feel refinement.
+Alpha for 1–8 players. Steer with two hold buttons and survive for up to 45 seconds.
+In multiplayer, the last survivor gets one point. If several drivers survive the
+time limit, the round is a draw. In solo play, reaching the time limit earns a point.
+
+## Arenas
+
+- **Reactor** is the default. Dodge two solid barriers and collect phase or boost pickups.
+- **Classic** has an open field and periodic trail gaps.
+- **Collapse** has pickups and moves the boundary inward after 12, 22 and 32 seconds.
+  A dashed line shows the next boundary three seconds before it moves.
+
+Every arena has short breaks in the trails. An amber ring around a driver
+announces their next gap. Cyan phase pickups let a driver cross trails without
+leaving one for 1.3 seconds. Walls, barriers and other drivers still cause
+crashes. Amber boost pickups raise speed by 30% for 1.8 seconds.
+
+The host draws new trail segments from incremental updates and interpolates the
+drivers between updates. Press and release events travel reliably to the server,
+which remains authoritative for movement, pickups, collisions and scoring.
 
 ## Run Through Open Party Lab
 
@@ -59,7 +75,7 @@ The Platform should import only these public entrypoints.
 ```bash
 npm install
 npm run typecheck
-npm run build
+npm test
 npm run pack:dry-run
 ```
 
@@ -70,3 +86,5 @@ For visual checks, start Open Party Lab, add virtual controllers when needed, an
 Code is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Assets, generated media, word lists, prompts, and third-party references may need separate rights review before public store distribution.
+
+The arena floor texture was generated for this game with OpenAI ImageGen.

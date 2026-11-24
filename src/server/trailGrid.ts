@@ -1,4 +1,4 @@
-import type { LightTrailsConfig } from "./lightTrailsConfig.js";
+import type { lightTrailsConfig } from "./lightTrailsConfig.js";
 
 export interface TrailGridMetrics {
   columns: number;
@@ -6,7 +6,7 @@ export interface TrailGridMetrics {
   cellSize: number;
 }
 
-export function createTrailGridMetrics(config: LightTrailsConfig): TrailGridMetrics {
+export function createTrailGridMetrics(config: typeof lightTrailsConfig): TrailGridMetrics {
   return {
     columns: Math.ceil(config.arenaWidth / config.gridCellSize),
     rows: Math.ceil(config.arenaHeight / config.gridCellSize),

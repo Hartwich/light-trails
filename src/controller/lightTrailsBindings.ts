@@ -1,12 +1,12 @@
-import type { LightTrailsTurnDirection } from "../protocol.js";
+import type { LightTrailsInput, LightTrailsTurnDirection } from "../protocol.js";
 
 export function createLightTrailsInput(
   playerId: string,
   direction: LightTrailsTurnDirection,
   active: boolean
-) {
+): LightTrailsInput {
   return {
-    type: "turn" as const,
+    type: "light-trails:turn",
     playerId,
     direction,
     active,

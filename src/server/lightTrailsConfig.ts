@@ -1,43 +1,40 @@
-export interface LightTrailsConfig {
-  arenaWidth: number;
-  arenaHeight: number;
-  tickRate: number;
-  moveSpeed: number;
-  turnSpeedRadPerSecond: number;
-  gridCellSize: number;
-  trailThickness: number;
-  gapEnabled: boolean;
-  gapIntervalMinTicks: number;
-  gapIntervalMaxTicks: number;
-  gapLengthTicks: number;
-  roundIntroMs: number;
-  countdownMs: number;
-  resultScreenMs: number;
-  scoreboardScreenMs: number;
-  lockedMs: number;
-  maxPlayingMs: number;
-  spawnRadiusFactor: number;
-}
+import type { LightTrailsRect } from "../protocol.js";
 
-export const lightTrailsConfig: LightTrailsConfig = {
+export const lightTrailsConfig = {
   arenaWidth: 960,
   arenaHeight: 540,
-  tickRate: 60,
   moveSpeed: 180,
   turnSpeedRadPerSecond: 3.8,
   gridCellSize: 4,
   trailThickness: 5,
-  gapEnabled: true,
-  gapIntervalMinTicks: 32,
-  gapIntervalMaxTicks: 60,
-  gapLengthTicks: 5,
-  roundIntroMs: 1_500,
-  countdownMs: 2_400,
-  resultScreenMs: 3_500,
-  scoreboardScreenMs: 4_000,
-  lockedMs: 1_000,
   maxPlayingMs: 45_000,
-  spawnRadiusFactor: 0.29
+  gapLengthMs: 125,
+  gapWarningMs: 170,
+  pickupRadius: 14,
+  pickupIntervalMs: 4_000,
+  phaseDurationMs: 1_300,
+  boostDurationMs: 1_800,
+  boostMultiplier: 1.3
 };
 
-// TODO: Fuer spaetere Powerups oder Arenavarianten hier mehrere Profile hinterlegen.
+export const reactorObstacles: readonly LightTrailsRect[] = [
+  { x: 172, y: 146, width: 132, height: 54 },
+  { x: 656, y: 340, width: 132, height: 54 }
+];
+
+const collapseStages = [
+  { atMs: 12_000, inset: 40 },
+  { atMs: 22_000, inset: 80 },
+  { atMs: 32_000, inset: 120 }
+];
+
+export function getCollapseBounds(elapsedMs: number): { inset: number; nextInset?: number } {
+  let inset = 0;
+  for (const stage of collapseStages) {
+    if (elapsedMs < stage.atMs) {
+      return { inset, nextInset: elapsedMs >= stage.atMs - 3_000 ? stage.inset : undefined };
+    }
+    inset = stage.inset;
+  }
+  return { inset, nextInset: undefined };
+}

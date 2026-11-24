@@ -2,6 +2,7 @@ import type { BaseRoundState } from "@open-party-lab/game-core";
 import type {
   LightTrailsCollisionReason,
   LightTrailsInput,
+  LightTrailsPower,
   LightTrailsTrailSegment,
   LightTrailsState as LightTrailsPublicState,
   LightTrailsTurnInput
@@ -22,8 +23,11 @@ export interface LightTrailsRuntimePlayerState {
   trailSegments: LightTrailsTrailSegment[];
   leftPressed: boolean;
   rightPressed: boolean;
-  gapTicksRemaining: number;
-  nextGapAtTick: number;
+  pendingTurn: LightTrailsTurnInput;
+  nextGapAtMs: number;
+  gapUntilMs: number;
+  power?: LightTrailsPower;
+  powerUntilMs: number;
   rngState: number;
   eliminatedAt?: number;
   collisionReason?: LightTrailsCollisionReason;
@@ -34,4 +38,6 @@ export interface LightTrailsRuntimeState
     Omit<LightTrailsPublicState, "players"> {
   players: Record<string, LightTrailsRuntimePlayerState>;
   occupiedCells: Record<number, string>;
+  nextPickupAtMs: number;
+  pickupSequence: number;
 }

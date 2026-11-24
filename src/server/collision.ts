@@ -1,29 +1,32 @@
-import type { LightTrailsCollisionReason } from "../protocol.js";
-import type { TrailGridMetrics } from "./trailGrid.js";
+import type { LightTrailsCollisionReason, LightTrailsRect } from "../protocol.js";
 
 export interface MovementProposal {
   playerId: string;
+  x: number;
+  y: number;
   nextX: number;
   nextY: number;
   nextAngleRad: number;
   pathCellIds: number[];
+  phased: boolean;
 }
 
 export interface CollisionEvaluation {
   byPlayerId: Record<string, LightTrailsCollisionReason>;
 }
 
-export function collidesWithArena(
-  x: number,
-  y: number,
-  metrics: TrailGridMetrics
-): boolean {
-  return (
-    x < 0 ||
-    y < 0 ||
-    x >= metrics.columns * metrics.cellSize ||
-    y >= metrics.rows * metrics.cellSize
-  );
+export function containsPoint(rect: LightTrailsRect, x: number, y: number): boolean {
+  return x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
+}
+
+function headsCollide(first: MovementProposal, second: MovementProposal): boolean {
+  const x = first.x - second.x;
+  const y = first.y - second.y;
+  const dx = first.nextX - second.nextX - x;
+  const dy = first.nextY - second.nextY - y;
+  const lengthSquared = dx * dx + dy * dy;
+  const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, -(x * dx + y * dy) / lengthSquared));
+  return (x + dx * t) ** 2 + (y + dy * t) ** 2 <= 25;
 }
 
 export function evaluateCollisions(
@@ -31,28 +34,18 @@ export function evaluateCollisions(
   occupiedCells: Record<number, string>
 ): CollisionEvaluation {
   const byPlayerId: Record<string, LightTrailsCollisionReason> = {};
-  const contendersByCell = new Map<number, string[]>();
-
-  for (const proposal of proposals) {
-    for (const cellId of proposal.pathCellIds) {
-      const contenders = contendersByCell.get(cellId) ?? [];
-      contenders.push(proposal.playerId);
-      contendersByCell.set(cellId, contenders);
-    }
-  }
-
-  for (const contenders of contendersByCell.values()) {
-    if (contenders.length <= 1) {
-      continue;
-    }
-
-    for (const playerId of contenders) {
-      byPlayerId[playerId] = "head_clash";
+  for (const [index, first] of proposals.entries()) {
+    for (let other = index + 1; other < proposals.length; other += 1) {
+      const second = proposals[other];
+      if (headsCollide(first, second)) {
+        byPlayerId[first.playerId] = "head_clash";
+        byPlayerId[second.playerId] = "head_clash";
+      }
     }
   }
 
   for (const proposal of proposals) {
-    if (byPlayerId[proposal.playerId]) {
+    if (byPlayerId[proposal.playerId] || proposal.phased) {
       continue;
     }
 

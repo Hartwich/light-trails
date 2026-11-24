@@ -2,560 +2,292 @@ import {
   createBaseRoundState,
   resolveRoundPhaseTimings,
   transitionRoundState,
-  type ScoreEntry,
   type ServerGame,
   type ServerGameContext
 } from "@open-party-lab/game-core";
+import { lightTrailsManifest } from "../manifest.js";
+import { isArena, lightTrailsCopy, resolveArena } from "../catalogText.js";
 import type {
+  LightTrailsCollisionReason,
+  LightTrailsHostPatch,
   LightTrailsInput,
   LightTrailsPlayerState,
-  LightTrailsTrailSegment,
   LightTrailsState
 } from "../protocol.js";
-import { lightTrailsManifest } from "../manifest.js";
-import { lightTrailsConfig } from "./lightTrailsConfig.js";
-import { collidesWithArena, evaluateCollisions, type MovementProposal } from "./collision.js";
-import type {
-  LightTrailsRuntimePlayerState,
-  LightTrailsRuntimeState
-} from "./lightTrailsState.js";
+import { containsPoint, evaluateCollisions, type MovementProposal } from "./collision.js";
+import { getCollapseBounds, lightTrailsConfig as config, reactorObstacles } from "./lightTrailsConfig.js";
+import type { LightTrailsRuntimePlayerState as Driver, LightTrailsRuntimeState as Runtime } from "./lightTrailsState.js";
+import { collectPickups, placePickups } from "./pickups.js";
 import { createTrailGridMetrics, pointToCellId, sampleTrailCellIds } from "./trailGrid.js";
 
 const phaseTimings = resolveRoundPhaseTimings(lightTrailsManifest.phaseDurations);
-const trailGridMetrics = createTrailGridMetrics(lightTrailsConfig);
+const grid = createTrailGridMetrics(config);
+const fullCircle = Math.PI * 2;
 
-function normalizeAngle(angleRad: number): number {
-  const fullCircle = Math.PI * 2;
-  const normalized = angleRad % fullCircle;
-  return normalized >= 0 ? normalized : normalized + fullCircle;
-}
-
-function hashStringToSeed(value: string): number {
-  let hash = 2_166_136_261;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
+function hash(value: string): number {
+  let seed = 2_166_136_261;
+  for (let index = 0; index < value.length; index++) {
+    seed = Math.imul(seed ^ value.charCodeAt(index), 16_777_619);
   }
-
-  return (hash >>> 0) || 1;
+  return seed >>> 0;
 }
 
-function nextRandomValue(seed: number): { nextSeed: number; value: number } {
-  const nextSeed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
-  return {
-    nextSeed,
-    value: nextSeed / 4_294_967_296
+function scheduleGap(player: Driver, elapsed: number): void {
+  player.rngState = (Math.imul(player.rngState, 1_664_525) + 1_013_904_223) >>> 0;
+  player.nextGapAtMs = elapsed + 800 + player.rngState % 650;
+}
+
+function createInitialState(context: ServerGameContext): Runtime {
+  const arena = resolveArena(context.roomSettings.arena);
+  const occupiedCells: Runtime["occupiedCells"] = {};
+  const players: Runtime["players"] = {};
+  context.players.forEach((player, index) => {
+    const orbit = -Math.PI / 2 + index / context.players.length * fullCircle;
+    const x = config.arenaWidth / 2 + Math.cos(orbit) * 148;
+    const y = config.arenaHeight / 2 + Math.sin(orbit) * 148;
+    const cell = pointToCellId(x, y, grid);
+    const driver: Driver = {
+      playerId: player.id, name: player.name, color: player.color, x, y,
+      angleRad: (orbit + Math.PI / 2) % fullCircle,
+      alive: true, turnInput: 0, leftPressed: false, rightPressed: false, pendingTurn: 0,
+      trailCellIds: cell === null ? [] : [cell], trailSegments: [],
+      nextGapAtMs: 0, gapUntilMs: 0, powerUntilMs: 0,
+      rngState: hash(`${context.roomCode}:${context.roundNumber}:${player.id}`)
+    };
+    scheduleGap(driver, 0);
+    if (cell !== null) occupiedCells[cell] = player.id;
+    players[player.id] = driver;
+  });
+
+  const state: Runtime = {
+    ...createBaseRoundState("round_intro", context.now, {
+      durationMs: phaseTimings.roundIntroMs,
+      message: lightTrailsCopy[context.language].intro
+    }),
+    arena,
+    arenaWidth: config.arenaWidth, arenaHeight: config.arenaHeight,
+    cellSize: config.gridCellSize, trailThickness: config.trailThickness,
+    obstacles: arena === "reactor" ? reactorObstacles : [],
+    inset: 0, pickups: [], nextPickupAtMs: 0, pickupSequence: 0,
+    tick: 0, remainingMs: config.maxPlayingMs, finishAt: null,
+    alivePlayerIds: Object.keys(players), playerCount: context.players.length, isDraw: false,
+    players, occupiedCells
   };
+  const withFirstPickup = placePickups(state, 0);
+  return placePickups({ ...withFirstPickup, nextPickupAtMs: 0 }, 0);
 }
 
-function deriveTurnInput(leftPressed: boolean, rightPressed: boolean): -1 | 0 | 1 {
-  if (leftPressed === rightPressed) {
-    return 0;
-  }
-
-  return leftPressed ? -1 : 1;
+function releaseSteering(player: Driver): Driver {
+  return { ...player, leftPressed: false, rightPressed: false, turnInput: 0, pendingTurn: 0 };
 }
 
-function scheduleNextGap(player: LightTrailsRuntimePlayerState, currentTick: number): LightTrailsRuntimePlayerState {
-  const intervalRange = Math.max(
-    0,
-    lightTrailsConfig.gapIntervalMaxTicks - lightTrailsConfig.gapIntervalMinTicks
-  );
-  const { nextSeed, value } = nextRandomValue(player.rngState);
-  const intervalTicks =
-    lightTrailsConfig.gapIntervalMinTicks + Math.round(value * intervalRange);
-
-  return {
-    ...player,
-    rngState: nextSeed,
-    nextGapAtTick: currentTick + intervalTicks + lightTrailsConfig.gapLengthTicks
-  };
-}
-
-function createRuntimePlayer(
-  player: ServerGameContext["players"][number],
-  roomCode: string,
-  playerIndex: number,
-  playerCount: number
-): LightTrailsRuntimePlayerState {
-  const centerX = lightTrailsConfig.arenaWidth / 2;
-  const centerY = lightTrailsConfig.arenaHeight / 2;
-  const spawnRadius =
-    Math.min(lightTrailsConfig.arenaWidth, lightTrailsConfig.arenaHeight) *
-    lightTrailsConfig.spawnRadiusFactor;
-  const orbitAngle = (-Math.PI / 2) + (playerIndex / Math.max(1, playerCount)) * Math.PI * 2;
-  const x = centerX + Math.cos(orbitAngle) * spawnRadius;
-  const y = centerY + Math.sin(orbitAngle) * spawnRadius;
-  const angleRad = normalizeAngle(orbitAngle + Math.PI / 2);
-  const startCellId = pointToCellId(x, y, trailGridMetrics);
-  return scheduleNextGap(
-    {
-      playerId: player.id,
-      name: player.name,
-      color: player.color,
-      x,
-      y,
-      angleRad,
-      alive: true,
-      turnInput: 0,
-      trailCellIds: startCellId === null ? [] : [startCellId],
-      trailSegments: [],
-      leftPressed: false,
-      rightPressed: false,
-      gapTicksRemaining: 0,
-      nextGapAtTick: 0,
-      rngState: hashStringToSeed(`${roomCode}:${player.id}`),
-      collisionReason: undefined,
-      eliminatedAt: undefined
-    },
-    0
-  );
-}
-
-function createPlayers(context: ServerGameContext): Record<string, LightTrailsRuntimePlayerState> {
-  return Object.fromEntries(
-    context.players.map((player, index) => {
-      const runtimePlayer = createRuntimePlayer(player, context.roomCode, index, context.players.length);
-      return [player.id, runtimePlayer];
-    })
-  );
-}
-
-function createOccupiedCells(players: Record<string, LightTrailsRuntimePlayerState>): Record<number, string> {
-  const occupiedCells: Record<number, string> = {};
-
-  for (const player of Object.values(players)) {
-    for (const cellId of player.trailCellIds) {
-      occupiedCells[cellId] = player.playerId;
-    }
-  }
-
-  return occupiedCells;
-}
-
-function updatePlayerInput(
-  state: LightTrailsRuntimeState,
-  input: LightTrailsInput
-): LightTrailsRuntimeState {
+function updatePlayerInput(state: Runtime, input: LightTrailsInput, context: ServerGameContext): Runtime {
   const player = state.players[input.playerId];
-
-  if (!player) {
+  if (!player?.alive || (input.direction !== "left" && input.direction !== "right") ||
+      typeof input.active !== "boolean") {
     return state;
   }
+  const field = input.direction === "left" ? "leftPressed" : "rightPressed";
+  if (player[field] === input.active) return state;
 
-  const leftPressed = input.direction === "left" ? input.active : player.leftPressed;
-  const rightPressed = input.direction === "right" ? input.active : player.rightPressed;
-  const nextPlayer: LightTrailsRuntimePlayerState = {
-    ...player,
-    leftPressed,
-    rightPressed,
-    turnInput: deriveTurnInput(leftPressed, rightPressed)
-  };
+  const direction = input.direction === "left" ? -1 : 1;
+  const next = { ...player, [field]: input.active };
+  // A quick press and release can arrive between two ticks. Preserve one turn sample.
+  if (input.active) next.pendingTurn = direction;
+  next.turnInput = next.leftPressed && next.rightPressed
+    ? (input.active ? direction : player.turnInput)
+    : next.leftPressed ? -1 : next.rightPressed ? 1 : 0;
 
-  return {
-    ...state,
-    players: {
-      ...state.players,
-      [input.playerId]: nextPlayer
-    },
-    updatedAt: input.sentAt
-  };
+  return { ...state, players: { ...state.players, [input.playerId]: next }, updatedAt: context.now };
 }
 
-function buildPublicPlayers(
-  players: Record<string, LightTrailsRuntimePlayerState>
-): Record<string, LightTrailsPlayerState> {
-  return Object.fromEntries(
-    Object.values(players).map((player) => [
-      player.playerId,
-      {
-        playerId: player.playerId,
-        name: player.name,
-        color: player.color,
-        x: player.x,
-        y: player.y,
-        angleRad: player.angleRad,
-        alive: player.alive,
-        turnInput: player.turnInput,
-        trailCellIds: [],
-        trailSegments: player.trailSegments,
-        eliminatedAt: player.eliminatedAt,
-        collisionReason: player.collisionReason
-      }
-    ])
-  );
+function prepareDrivers(state: Runtime, context: ServerGameContext, elapsed: number): Runtime["players"] {
+  const connected = new Set(context.players.filter((player) => player.connected).map((player) => player.id));
+  return Object.fromEntries(Object.entries(state.players).map(([id, previous]) => {
+    if (!previous.alive) return [id, previous];
+    const player = connected.has(id) ? { ...previous } : releaseSteering(previous);
+    if (elapsed >= player.nextGapAtMs) {
+      player.gapUntilMs = elapsed + config.gapLengthMs;
+      scheduleGap(player, player.gapUntilMs);
+    }
+    return [id, player];
+  }));
 }
 
-function buildScore(state: LightTrailsRuntimeState): ScoreEntry[] {
-  return state.winnerPlayerId
-    ? [
-        {
-          playerId: state.winnerPlayerId,
-          delta: 1,
-          reason: "Light Trails"
-        }
-      ]
-    : [];
-}
-
-function neutralizeDisconnectedPlayers(
-  state: LightTrailsRuntimeState,
-  context: ServerGameContext
-): LightTrailsRuntimeState {
-  const connectedByPlayerId = new Map(context.players.map((player) => [player.id, player.connected]));
-  let changed = false;
-  const players = Object.fromEntries(
-    Object.values(state.players).map((player) => {
-      if (!player.alive || connectedByPlayerId.get(player.playerId) !== false) {
-        return [player.playerId, player];
-      }
-
-      if (!player.leftPressed && !player.rightPressed && player.turnInput === 0) {
-        return [player.playerId, player];
-      }
-
-      changed = true;
-      return [
-        player.playerId,
-        {
-          ...player,
-          leftPressed: false,
-          rightPressed: false,
-          turnInput: 0
-        }
-      ];
-    })
-  ) as Record<string, LightTrailsRuntimePlayerState>;
-
-  if (!changed) {
-    return state;
-  }
-
-  return {
-    ...state,
-    players
-  };
-}
-
-function simulateTick(
-  state: LightTrailsRuntimeState,
-  deltaMs: number,
-  context: ServerGameContext
-): LightTrailsRuntimeState {
-  let nextState = neutralizeDisconnectedPlayers(state, context);
-  const alivePlayers = Object.values(nextState.players).filter((player) => player.alive);
-  const totalPlayers = Object.keys(nextState.players).length;
-
-  if (totalPlayers > 1 && alivePlayers.length <= 1) {
-    return nextState;
-  }
-
-  const seconds = Math.max(0.001, deltaMs / 1000);
-  const distancePerTick = lightTrailsConfig.moveSpeed * seconds;
-  const substeps = Math.max(
-    1,
-    Math.ceil(distancePerTick / Math.max(1, lightTrailsConfig.gridCellSize * 0.75))
-  );
+function moveDrivers(state: Runtime, seconds: number, context: ServerGameContext, elapsed: number): void {
+  const drivers = Object.values(state.players).filter((player) => player.alive);
+  const inset = state.inset;
+  const bounds = { x: inset, y: inset, width: state.arenaWidth - 2 * inset, height: state.arenaHeight - 2 * inset };
+  // Keep each step shorter than a grid cell, including at boosted speed.
+  const substeps = Math.max(1, Math.ceil(seconds * config.moveSpeed * config.boostMultiplier / (grid.cellSize * 0.75)));
   const stepSeconds = seconds / substeps;
-  let players = { ...nextState.players };
-  let occupiedCells = { ...nextState.occupiedCells };
-
-  for (let stepIndex = 0; stepIndex < substeps; stepIndex += 1) {
+  for (let step = 0; step < substeps; step++) {
     const proposals: MovementProposal[] = [];
-    const wallHits = new Set<string>();
-
-    for (const player of Object.values(players)) {
-      if (!player.alive) {
+    const crashes: Record<string, LightTrailsCollisionReason> = {};
+    for (const player of drivers) {
+      if (!player.alive) continue;
+      const turn = player.turnInput || player.pendingTurn;
+      const angle = (player.angleRad + turn * config.turnSpeedRadPerSecond * stepSeconds + fullCircle) % fullCircle;
+      const powered = elapsed < player.powerUntilMs;
+      const distance = config.moveSpeed * stepSeconds * (powered && player.power === "boost" ? config.boostMultiplier : 1);
+      const x = player.x + Math.cos(angle) * distance;
+      const y = player.y + Math.sin(angle) * distance;
+      if (!containsPoint(bounds, player.x, player.y) || !containsPoint(bounds, x, y)) {
+        crashes[player.playerId] = inset > 0 ? "collapse" : "wall";
         continue;
       }
-
-      const nextAngleRad = normalizeAngle(
-        player.angleRad + player.turnInput * lightTrailsConfig.turnSpeedRadPerSecond * stepSeconds
-      );
-      const nextX = player.x + Math.cos(nextAngleRad) * lightTrailsConfig.moveSpeed * stepSeconds;
-      const nextY = player.y + Math.sin(nextAngleRad) * lightTrailsConfig.moveSpeed * stepSeconds;
-
-      if (collidesWithArena(nextX, nextY, trailGridMetrics)) {
-        wallHits.add(player.playerId);
+      if (state.obstacles.some((rect) => containsPoint(rect, x, y))) {
+        crashes[player.playerId] = "reactor";
         continue;
       }
-
-      const currentCellId = pointToCellId(player.x, player.y, trailGridMetrics);
-      const pathCellIds = sampleTrailCellIds(player.x, player.y, nextX, nextY, trailGridMetrics).filter(
-        (cellId) => cellId !== currentCellId
-      );
-
+      const current = pointToCellId(player.x, player.y, grid);
+      const phased = powered && player.power === "phase";
+      const phaseJustEnded = step === 0 && player.power === "phase" && !powered;
+      const path = sampleTrailCellIds(player.x, player.y, x, y, grid)
+        .filter((cell) => cell !== current || phaseJustEnded);
       proposals.push({
-        playerId: player.playerId,
-        nextX,
-        nextY,
-        nextAngleRad,
-        pathCellIds
+        playerId: player.playerId, x: player.x, y: player.y,
+        nextX: x, nextY: y, nextAngleRad: angle, pathCellIds: path, phased
       });
     }
 
-    const collisionEvaluation = evaluateCollisions(proposals, occupiedCells);
-    const collidedPlayerIds = new Set([
-      ...wallHits,
-      ...Object.keys(collisionEvaluation.byPlayerId)
-    ]);
-
-    for (const playerId of collidedPlayerIds) {
-      const player = players[playerId];
-
-      if (!player || !player.alive) {
-        continue;
-      }
-
-      players[playerId] = {
-        ...player,
-        alive: false,
-        turnInput: 0,
-        leftPressed: false,
-        rightPressed: false,
-        eliminatedAt: context.now,
-        collisionReason: wallHits.has(playerId)
-          ? "wall"
-          : collisionEvaluation.byPlayerId[playerId]
-      };
+    Object.assign(crashes, evaluateCollisions(proposals, state.occupiedCells).byPlayerId);
+    for (const [id, reason] of Object.entries(crashes)) {
+      const player = state.players[id];
+      Object.assign(player, releaseSteering(player), { alive: false, eliminatedAt: context.now, collisionReason: reason });
     }
 
     for (const proposal of proposals) {
-      const player = players[proposal.playerId];
-
-      if (!player || !player.alive) {
-        continue;
-      }
-
-      // This hot path runs for every living player on every tick. We intentionally
-      // reuse the existing trail buffers here instead of rebuilding full arrays,
-      // because immutable `[...segments, nextSegment]` copies were causing
-      // increasingly heavy GC and frame drops in longer sessions.
-      const nextPlayer: LightTrailsRuntimePlayerState = {
-        ...player
-      };
-      nextPlayer.x = proposal.nextX;
-      nextPlayer.y = proposal.nextY;
-      nextPlayer.angleRad = proposal.nextAngleRad;
-      let shouldDrawTrail = !lightTrailsConfig.gapEnabled;
-
-      if (lightTrailsConfig.gapEnabled) {
-        const shouldStartGap = nextState.tick >= nextPlayer.nextGapAtTick && nextPlayer.gapTicksRemaining === 0;
-
-        if (shouldStartGap) {
-          Object.assign(
-            nextPlayer,
-            scheduleNextGap(
-              {
-                ...nextPlayer,
-                gapTicksRemaining: lightTrailsConfig.gapLengthTicks
-              },
-              nextState.tick
-            )
-          );
+      const player = state.players[proposal.playerId];
+      if (!player.alive) continue;
+      if (!proposal.phased && elapsed >= player.gapUntilMs) {
+        player.trailSegments.push({ x1: player.x, y1: player.y, x2: proposal.nextX, y2: proposal.nextY });
+        for (const cell of proposal.pathCellIds) {
+          if (state.occupiedCells[cell] !== undefined) continue;
+          state.occupiedCells[cell] = player.playerId;
+          player.trailCellIds.push(cell);
         }
-
-        shouldDrawTrail = nextPlayer.gapTicksRemaining === 0;
       }
-
-      if (shouldDrawTrail) {
-        const nextSegment: LightTrailsTrailSegment = {
-          x1: player.x,
-          y1: player.y,
-          x2: proposal.nextX,
-          y2: proposal.nextY
-        };
-        const appendedCells = proposal.pathCellIds.filter((cellId) => occupiedCells[cellId] === undefined);
-
-        nextPlayer.trailSegments.push(nextSegment);
-
-        if (appendedCells.length > 0) {
-          nextPlayer.trailCellIds.push(...appendedCells);
-
-          for (const cellId of appendedCells) {
-            occupiedCells[cellId] = nextPlayer.playerId;
-          }
-        }
-      } else {
-        nextPlayer.gapTicksRemaining = Math.max(0, nextPlayer.gapTicksRemaining - 1);
-      }
-
-      players[proposal.playerId] = nextPlayer;
+      player.x = proposal.nextX;
+      player.y = proposal.nextY;
+      player.angleRad = proposal.nextAngleRad;
     }
+    if (state.playerCount > 1 && drivers.filter((player) => player.alive).length <= 1) break;
   }
+  for (const driver of drivers) {
+    driver.pendingTurn = 0;
+    if (elapsed >= driver.powerUntilMs) driver.power = undefined;
+  }
+}
 
-  const alivePlayerIds = Object.values(players)
-    .filter((player) => player.alive)
-    .map((player) => player.playerId);
-  const winnerPlayerId =
-    totalPlayers > 1 && alivePlayerIds.length === 1 ? alivePlayerIds[0] : undefined;
-  const winnerName = winnerPlayerId ? players[winnerPlayerId]?.name : undefined;
-  const timedOut = nextState.finishAt !== null && context.now >= nextState.finishAt;
-  const soloPlayerId = totalPlayers === 1 ? alivePlayerIds[0] : undefined;
-  const soloWinnerId = totalPlayers === 1 && timedOut ? soloPlayerId : undefined;
-  const resolvedWinnerPlayerId = soloWinnerId ?? winnerPlayerId;
-  const resolvedWinnerName = resolvedWinnerPlayerId
-    ? players[resolvedWinnerPlayerId]?.name
-    : undefined;
-  const isDraw =
-    totalPlayers > 1
-      ? alivePlayerIds.length === 0 || (timedOut && alivePlayerIds.length > 1)
-      : alivePlayerIds.length === 0;
-  const text = {
-    de: { winner: "ueberlebt als Letzter.", solo: "haelt bis zum Zeitlimit durch.", draw: "Diese Runde endet unentschieden.", time: "Zeit abgelaufen.", crash: "Alle sind kollidiert. Unentschieden.", drivers: "Fahrer sind noch im Rennen." },
-    en: { winner: "is the last one standing.", solo: "survived until the time limit.", draw: "This round ends in a draw.", time: "Time is up.", crash: "Everyone crashed. Draw.", drivers: "drivers are still racing." },
-    es: { winner: "es el último en pie.", solo: "sobrevivió hasta que se acabó el tiempo.", draw: "La ronda termina en empate.", time: "Se acabó el tiempo.", crash: "Todos chocaron. Empate.", drivers: "pilotos siguen en carrera." },
-    fr: { winner: "est le dernier en lice.", solo: "a survécu jusqu’à la fin du temps imparti.", draw: "La manche se termine par une égalité.", time: "Le temps est écoulé.", crash: "Tout le monde a percuté une traînée. Égalité.", drivers: "pilotes sont encore en course." },
-    "pt-BR": { winner: "é o último sobrevivente.", solo: "sobreviveu até o tempo acabar.", draw: "A rodada termina empatada.", time: "O tempo acabou.", crash: "Todos bateram. Empate.", drivers: "pilotos continuam na corrida." }
-  }[context.language];
-  const message = resolvedWinnerPlayerId
-    ? totalPlayers === 1
-      ? `${resolvedWinnerName ?? (context.language === "de" ? "Du" : context.language === "en" ? "You" : context.language === "es" ? "Tú" : context.language === "fr" ? "Toi" : "Você")} ${text.solo}`
-      : `${resolvedWinnerName ?? (context.language === "de" ? "Ein Spieler" : context.language === "en" ? "A player" : context.language === "es" ? "Un jugador" : context.language === "fr" ? "Un joueur" : "Um jogador")} ${text.winner}`
-    : timedOut
-      ? totalPlayers === 1
-        ? text.time
-        : `${text.time} ${text.draw}`
-      : alivePlayerIds.length === 0
-        ? totalPlayers === 1
-          ? text.crash
-          : text.crash
-        : `${alivePlayerIds.length} ${text.drivers}`;
+function simulateTick(previous: Runtime, deltaMs: number, context: ServerGameContext): Runtime {
+  const remainingMs = Math.max(0, (previous.finishAt ?? context.now) - context.now);
+  const elapsed = config.maxPlayingMs - remainingMs;
+  let state: Runtime = {
+    ...previous,
+    ...(previous.arena === "collapse" ? getCollapseBounds(elapsed) : {}),
+    tick: previous.tick + 1, updatedAt: context.now,
+    players: prepareDrivers(previous, context, elapsed)
+  };
+  moveDrivers(state, Math.max(0, deltaMs) / 1000, context, elapsed);
+  state = placePickups(collectPickups(state, elapsed), elapsed);
 
+  const alive = Object.values(state.players).filter((player) => player.alive);
+  const timedOut = remainingMs === 0;
+  const solo = state.playerCount === 1;
+  const winner = alive.length === 1 && (!solo || timedOut) ? alive[0] : undefined;
+  const isDraw = alive.length === 0 || (timedOut && !winner);
+  const words = lightTrailsCopy[context.language];
   return {
-    ...nextState,
-    tick: nextState.tick + 1,
-    players,
-    occupiedCells,
-    alivePlayerIds,
-    winnerPlayerId: resolvedWinnerPlayerId,
-    winnerName: resolvedWinnerName,
-    isDraw,
-    updatedAt: context.now,
-    message
+    ...state, remainingMs, alivePlayerIds: alive.map((player) => player.playerId),
+    winnerPlayerId: winner?.playerId, winnerName: winner?.name, isDraw,
+    message: winner ? (solo ? words.solo : words.won(winner.name))
+      : alive.length === 0 ? (solo ? words.out : words.draw)
+      : timedOut ? words.time : undefined
   };
 }
 
-export const serverGame: ServerGame<
-  LightTrailsRuntimeState,
-  LightTrailsInput,
-  LightTrailsState
-> = {
-  manifest: lightTrailsManifest,
-  createInitialState(context) {
-    const players = createPlayers(context);
+function publicState(state: Runtime, playerId?: string, includeTrails = true): LightTrailsState {
+  const { players, arena, arenaWidth, arenaHeight, cellSize, trailThickness, obstacles, inset, nextInset,
+    pickups, playerCount, remainingMs, tick, alivePlayerIds, winnerPlayerId, winnerName, isDraw, finishAt } = state;
+  const elapsed = config.maxPlayingMs - remainingMs;
+  const drivers = playerId ? (players[playerId] ? [players[playerId]] : []) : Object.values(players);
+  const publicPlayers: Record<string, LightTrailsPlayerState> = Object.fromEntries(drivers.map((p) => [
+    p.playerId, {
+      playerId: p.playerId, name: p.name, color: p.color, x: p.x, y: p.y, angleRad: p.angleRad,
+      alive: p.alive, turnInput: p.turnInput,
+      trailCellIds: [], trailLength: includeTrails ? p.trailSegments.length : 0,
+      trailSegments: includeTrails ? p.trailSegments : [],
+      gap: !p.alive ? undefined : elapsed < p.gapUntilMs ? "open"
+        : elapsed >= p.nextGapAtMs - config.gapWarningMs ? "warning" : undefined,
+      power: p.alive ? p.power : undefined, eliminatedAt: p.eliminatedAt, collisionReason: p.collisionReason
+    }
+  ]));
+  return {
+    arena, arenaWidth, arenaHeight, cellSize, trailThickness,
+    obstacles: includeTrails ? obstacles : [], inset, nextInset, pickups: includeTrails ? pickups : [],
+    playerCount, remainingMs, tick, alivePlayerIds, winnerPlayerId, winnerName, isDraw, finishAt, players: publicPlayers
+  };
+}
 
-    return {
-      ...createBaseRoundState("round_intro", context.now, {
-        durationMs: phaseTimings.roundIntroMs,
-        message: ({ de: "Links oder rechts gedrückt halten. Nicht die Spur berühren.", en: "Hold left or right. Do not touch the trail.", es: "Mantén izquierda o derecha. No toques la estela.", fr: "Maintiens gauche ou droite. Ne touche pas la traînée.", "pt-BR": "Segure para a esquerda ou direita. Não toque no rastro." })[context.language]
-      }),
-      arenaWidth: lightTrailsConfig.arenaWidth,
-      arenaHeight: lightTrailsConfig.arenaHeight,
-      cellSize: lightTrailsConfig.gridCellSize,
-      trailThickness: lightTrailsConfig.trailThickness,
-      tick: 0,
-      alivePlayerIds: Object.keys(players),
-      winnerPlayerId: undefined,
-      winnerName: undefined,
-      isDraw: false,
-      finishAt: null,
-      players,
-      occupiedCells: createOccupiedCells(players)
-    };
+export const serverGame: ServerGame<Runtime, LightTrailsInput, LightTrailsState> = {
+  manifest: lightTrailsManifest,
+  createInitialState,
+  handleHostAction(state, action) {
+    if ((state && state.phase !== "finished") || !action || typeof action !== "object") return null;
+    const { type, arena } = action as { type?: unknown; arena?: unknown };
+    return type === "configure-lobby" && isArena(arena) ? { roomSettings: { arena } } : null;
   },
   startRound(state, context) {
     return transitionRoundState(
-      {
-        ...state,
-        finishAt: context.now + lightTrailsConfig.maxPlayingMs,
-        message: ({ de: "Lenken, überleben, gewinnen.", en: "Steer, survive, win.", es: "Conduce, sobrevive y gana.", fr: "Pilote, survis, gagne.", "pt-BR": "Dirija, sobreviva e vença." })[context.language]
-      },
-      "playing",
-      context.now,
-      {
-        startedAt: context.now,
-        message: ({ de: "Lenken, überleben, gewinnen.", en: "Steer, survive, win.", es: "Conduce, sobrevive y gana.", fr: "Pilote, survis, gagne.", "pt-BR": "Dirija, sobreviva e vença." })[context.language]
-      }
+      { ...state, finishAt: context.now + config.maxPlayingMs, message: undefined },
+      "playing", context.now, { startedAt: context.now }
     );
   },
   onPause(state) {
     return { ...state, players: Object.fromEntries(Object.entries(state.players).map(([id, player]) =>
-      [id, { ...player, leftPressed: false, rightPressed: false, turnInput: 0 as const }])) };
+      [id, releaseSteering(player)])) };
   },
-  handleInput(state, input) {
-    if (input.type !== "turn" || (state.phase !== "countdown" && state.phase !== "playing")) {
-      return state;
-    }
-
-    return updatePlayerInput(state, input);
+  handleInput(state, input, context) {
+    return state.phase === "playing" && (input.type === "light-trails:turn" || input.type === "turn")
+      ? updatePlayerInput(state, input, context)
+      : state;
   },
   tick(state, deltaMs, context) {
-    if (state.phase !== "playing") {
-      return state;
-    }
-
-    return simulateTick(state, deltaMs, context);
+    return state.phase === "playing" ? simulateTick(state, deltaMs, context) : state;
   },
   isRoundFinished(state) {
-    const totalPlayers = Object.keys(state.players).length;
-
-    if (totalPlayers <= 1) {
-      return state.phase === "locked" || state.isDraw || Boolean(state.winnerPlayerId);
-    }
-
-    return state.phase === "locked" || state.isDraw || state.alivePlayerIds.length <= 1;
+    return state.phase === "locked" || state.isDraw || Boolean(state.winnerPlayerId) || state.playerCount === 0;
   },
   buildScore(state) {
-    return buildScore(state);
+    return state.winnerPlayerId ? [{ playerId: state.winnerPlayerId, delta: 1, reason: "Light Trails" }] : [];
   },
-  toPublicState(state) {
+  toPublicState(state, context) {
     return {
-      arenaWidth: state.arenaWidth,
-      arenaHeight: state.arenaHeight,
-      cellSize: state.cellSize,
-      trailThickness: state.trailThickness,
-      tick: state.tick,
-      alivePlayerIds: state.alivePlayerIds,
-      winnerPlayerId: state.winnerPlayerId,
-      winnerName: state.winnerName,
-      isDraw: state.isDraw,
-      finishAt: state.finishAt,
-      players: buildPublicPlayers(state.players)
+      ...publicState(state),
+      countdownMs: state.phase === "countdown" && state.phaseEndsAt !== null
+        ? Math.max(0, state.phaseEndsAt - context.now) : undefined
     };
   },
   toControllerState(state) {
-    return {
-      arenaWidth: state.arenaWidth,
-      arenaHeight: state.arenaHeight,
-      cellSize: state.cellSize,
-      trailThickness: state.trailThickness,
-      tick: state.tick,
-      alivePlayerIds: state.alivePlayerIds,
-      winnerPlayerId: state.winnerPlayerId,
-      winnerName: state.winnerName,
-      isDraw: state.isDraw,
-      finishAt: state.finishAt,
-      players: Object.fromEntries(
-        Object.values(state.players).map((player) => [
-          player.playerId,
-          {
-            playerId: player.playerId,
-            name: player.name,
-            color: player.color,
-            x: player.x,
-            y: player.y,
-            angleRad: player.angleRad,
-            alive: player.alive,
-            turnInput: player.turnInput,
-            trailCellIds: [],
-            trailSegments: [],
-            eliminatedAt: player.eliminatedAt,
-            collisionReason: player.collisionReason
-          }
-        ])
-      )
+    return publicState(state, undefined, false);
+  },
+  toControllerStateForPlayer(state, _context, id) {
+    return publicState(state, id, false);
+  },
+  buildHostPatch(state, previous) {
+    if (!previous || state.tick <= previous.tick) return null;
+    const { players, tick, pickups, inset, nextInset, remainingMs, alivePlayerIds, winnerPlayerId, winnerName, isDraw } = state;
+    const patch: LightTrailsHostPatch = {
+      tick, pickups, inset, nextInset, remainingMs, alivePlayerIds, winnerPlayerId, winnerName, isDraw,
+      fromTick: previous.tick,
+      players: Object.fromEntries(Object.values(players).map((player) => {
+        // Runtime buffers are append-only. The sent count is captured by value with each snapshot.
+        const trailStart = previous.players[player.playerId]?.trailLength ?? 0;
+        const { trailSegments, trailCellIds: _cells, trailLength, ...driver } = player;
+        return [player.playerId, { ...driver, trailStart, trailSegments: trailSegments.slice(trailStart, trailLength) }];
+      }))
     };
+    return patch;
   }
 };
